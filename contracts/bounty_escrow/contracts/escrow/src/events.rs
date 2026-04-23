@@ -1409,3 +1409,56 @@ pub fn emit_recurring_lock_cancelled(env: &Env, event: RecurringLockCancelled) {
     let topics = (symbol_short!("rl_cncl"), event.recurring_id);
     env.events().publish(topics, event);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLAIM-WINDOW EVENTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Payload for the [`emit_claim_window_updated`] event.
+///
+/// Emitted when the admin sets or updates the global claim-window duration via
+/// [`BountyEscrowContract::set_claim_window`].
+///
+/// ### Topics
+/// | Index | Value |
+/// |-------|-------|
+/// | 0 | `"cw_upd"` |
+///
+/// ### Data fields
+/// | Field | Type | Description |
+/// |-------|------|-------------|
+/// | `version` | `u32` | Always [`EVENT_VERSION_V2`] |
+/// | `previous_window_secs` | `u64` | Previous value (`0` = never set) |
+/// | `new_window_secs` | `u64` | New validated value |
+/// | `updated_by` | `Address` | Admin that made the change |
+/// | `timestamp` | `u64` | Ledger time of update |
+///
+/// ### Security notes
+/// - Only the admin can call `set_claim_window`; this event is an on-chain
+///   audit trail of every configuration change.
+/// - Emitted **after** the new value is persisted (CEI ordering) so the event
+///   accurately reflects the settled on-chain state.
+/// - `previous_window_secs = 0` indicates the window was never previously set.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimWindowUpdated {
+    pub version: u32,
+    /// Previous claim-window value in seconds (`0` = never set).
+    pub previous_window_secs: u64,
+    /// New claim-window value in seconds.
+    pub new_window_secs: u64,
+    /// Admin address that triggered the update.
+    pub updated_by: Address,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+}
+
+/// Emit [`ClaimWindowUpdated`].
+///
+/// # Arguments
+/// * `env`   — Soroban execution environment.
+/// * `event` — Pre-constructed event payload.
+pub fn emit_claim_window_updated(env: &Env, event: ClaimWindowUpdated) {
+    let topics = (symbol_short!("cw_upd"),);
+    env.events().publish(topics, event);
+}

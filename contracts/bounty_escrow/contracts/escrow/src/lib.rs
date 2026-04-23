@@ -617,6 +617,9 @@ pub enum Error {
     EscrowFrozen = 45,
     /// Returned when the escrow depositor is explicitly frozen by an admin hold.
     AddressFrozen = 46,
+    /// Returned when the claim window value is outside the allowed range
+    /// [MIN_CLAIM_WINDOW_SECS, MAX_CLAIM_WINDOW_SECS].
+    InvalidClaimWindow = 47,
 }
 
 /// Bit flag: escrow or payout should be treated as elevated risk (indexers, UIs).
@@ -832,6 +835,9 @@ pub enum DataKey {
     CycleLink(u64),
     /// Stored schema marker for refund-eligibility view semantics.
     RefundEligibilitySchemaVersion,
+    /// Stored schema marker for claim-window storage layout versioning.
+    /// Increment when the `ClaimWindow` storage layout changes.
+    ClaimWindowSchemaVersion,
 }
 
 #[contracttype]
@@ -960,6 +966,19 @@ pub struct ReleaseApproval {
 }
 
 const REFUND_ELIGIBILITY_SCHEMA_VERSION_V1: u32 = 1;
+
+/// Current claim-window storage schema version.
+///
+/// Increment whenever the `ClaimWindow` storage layout changes in a breaking way.
+/// Written to instance storage during `init` so upgrade safety checks can detect
+/// schema mismatches on legacy deployments.
+const CLAIM_WINDOW_SCHEMA_VERSION_V1: u32 = 1;
+
+/// Minimum allowed claim window: 60 seconds (1 minute).
+pub const MIN_CLAIM_WINDOW_SECS: u64 = 60;
+
+/// Maximum allowed claim window: 30 days in seconds.
+pub const MAX_CLAIM_WINDOW_SECS: u64 = 30 * 24 * 3600; // 2_592_000
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1183,6 +1202,11 @@ impl BountyEscrowContract {
         env.storage().instance().set(
             &DataKey::RefundEligibilitySchemaVersion,
             &REFUND_ELIGIBILITY_SCHEMA_VERSION_V1,
+        );
+        // Write upgrade-safe claim-window schema version marker.
+        env.storage().instance().set(
+            &DataKey::ClaimWindowSchemaVersion,
+            &CLAIM_WINDOW_SCHEMA_VERSION_V1,
         );
 
         events::emit_bounty_initialized(
@@ -3512,17 +3536,73 @@ impl BountyEscrowContract {
     }
 
     /// Set the claim window duration (admin only).
-    /// claim_window: seconds beneficiary has to claim after release is authorized.
-    pub fn set_claim_window(env: Env, claim_window: u64) -> Result<(), Error> {
+    ///
+    /// `claim_window_secs` is the number of seconds a beneficiary has to call
+    /// `claim` after `authorize_claim` is called.
+    ///
+    /// # Validation
+    /// - Must be in the range `[MIN_CLAIM_WINDOW_SECS, MAX_CLAIM_WINDOW_SECS]`
+    ///   (60 s – 2_592_000 s / 30 days).
+    /// - Zero is explicitly rejected to prevent silent "instant-expiry" claims.
+    ///
+    /// # Audit event
+    /// Emits `ClaimWindowUpdated` after the new value is persisted so indexers
+    /// have an on-chain record of every configuration change.
+    pub fn set_claim_window(env: Env, claim_window_secs: u64) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
         }
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+
+        // Explicit range validation — deterministic and documented.
+        if claim_window_secs < MIN_CLAIM_WINDOW_SECS
+            || claim_window_secs > MAX_CLAIM_WINDOW_SECS
+        {
+            return Err(Error::InvalidClaimWindow);
+        }
+
+        let previous: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ClaimWindow)
+            .unwrap_or(0);
+
         env.storage()
             .instance()
-            .set(&DataKey::ClaimWindow, &claim_window);
+            .set(&DataKey::ClaimWindow, &claim_window_secs);
+
+        // Emit audit event after storage write (CEI ordering).
+        events::emit_claim_window_updated(
+            &env,
+            events::ClaimWindowUpdated {
+                version: EVENT_VERSION_V2,
+                previous_window_secs: previous,
+                new_window_secs: claim_window_secs,
+                updated_by: admin,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
         Ok(())
+    }
+
+    /// Return the currently configured claim window in seconds.
+    /// Returns `0` when no window has been set (legacy / uninitialized).
+    pub fn get_claim_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ClaimWindow)
+            .unwrap_or(0)
+    }
+
+    /// Return the claim-window storage schema version written during `init`.
+    /// Returns `0` on legacy deployments where the marker was never written.
+    pub fn get_claim_window_schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ClaimWindowSchemaVersion)
+            .unwrap_or(0u32)
     }
 
     /// Authorizes a pending claim instead of immediate transfer.

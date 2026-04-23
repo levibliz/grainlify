@@ -461,3 +461,164 @@ fn test_partially_refunded_to_released_fails() {
 
     setup.escrow.release_funds(&bounty_id, &setup.contributor);
 }
+
+// ============================================================================
+// CLAIM-WINDOW VALIDATION TESTS (Issue #29)
+// ============================================================================
+//
+// These tests verify the claim-window invariants:
+//   - set_claim_window rejects values outside [MIN_CLAIM_WINDOW_SECS, MAX_CLAIM_WINDOW_SECS]
+//   - Zero is explicitly rejected (prevents silent instant-expiry claims)
+//   - Valid values are persisted and readable via get_claim_window
+//   - ClaimWindowUpdated audit event is emitted on every successful update
+//   - Upgrade-safe schema version is written on init
+//   - authorize_claim uses the configured window for expires_at
+
+/// CW-1: set_claim_window with minimum valid value (60 s) succeeds.
+#[test]
+fn test_claim_window_minimum_valid_value_accepted() {
+    let setup = TestSetup::new();
+    let result = setup.escrow.try_set_claim_window(&60u64);
+    assert!(result.is_ok(), "60 s must be accepted as minimum");
+    assert_eq!(setup.escrow.get_claim_window(), 60u64);
+}
+
+/// CW-2: set_claim_window with maximum valid value (30 days) succeeds.
+#[test]
+fn test_claim_window_maximum_valid_value_accepted() {
+    let setup = TestSetup::new();
+    let max: u64 = 30 * 24 * 3600;
+    let result = setup.escrow.try_set_claim_window(&max);
+    assert!(result.is_ok(), "30 days must be accepted as maximum");
+    assert_eq!(setup.escrow.get_claim_window(), max);
+}
+
+/// CW-3: set_claim_window with zero is rejected.
+#[test]
+fn test_claim_window_zero_rejected() {
+    let setup = TestSetup::new();
+    let result = setup.escrow.try_set_claim_window(&0u64);
+    assert!(result.is_err(), "zero must be rejected");
+}
+
+/// CW-4: set_claim_window with value below minimum (59 s) is rejected.
+#[test]
+fn test_claim_window_below_minimum_rejected() {
+    let setup = TestSetup::new();
+    let result = setup.escrow.try_set_claim_window(&59u64);
+    assert!(result.is_err(), "59 s is below minimum and must be rejected");
+}
+
+/// CW-5: set_claim_window with value above maximum (30 days + 1 s) is rejected.
+#[test]
+fn test_claim_window_above_maximum_rejected() {
+    let setup = TestSetup::new();
+    let over_max: u64 = 30 * 24 * 3600 + 1;
+    let result = setup.escrow.try_set_claim_window(&over_max);
+    assert!(result.is_err(), "value above 30 days must be rejected");
+}
+
+/// CW-6: set_claim_window can be updated; new value takes effect immediately.
+#[test]
+fn test_claim_window_update_takes_effect() {
+    let setup = TestSetup::new();
+    setup.escrow.set_claim_window(&3600u64);
+    assert_eq!(setup.escrow.get_claim_window(), 3600u64);
+
+    setup.escrow.set_claim_window(&7200u64);
+    assert_eq!(setup.escrow.get_claim_window(), 7200u64);
+}
+
+/// CW-7: get_claim_window returns 0 before any window is set.
+#[test]
+fn test_claim_window_default_is_zero() {
+    let setup = TestSetup::new();
+    assert_eq!(
+        setup.escrow.get_claim_window(),
+        0u64,
+        "default claim window must be 0 (unset)"
+    );
+}
+
+/// CW-8: ClaimWindowUpdated audit event is emitted on successful set.
+#[test]
+fn test_claim_window_audit_event_emitted() {
+    let setup = TestSetup::new();
+    let events_before = setup.env.events().all().len();
+    setup.escrow.set_claim_window(&3600u64);
+    let events_after = setup.env.events().all();
+    assert!(
+        events_after.len() > events_before,
+        "ClaimWindowUpdated event must be emitted"
+    );
+}
+
+/// CW-9: upgrade-safe schema version is written on init.
+#[test]
+fn test_claim_window_schema_version_written_on_init() {
+    let setup = TestSetup::new();
+    let version = setup.escrow.get_claim_window_schema_version();
+    assert_eq!(version, 1u32, "schema version must be 1 after init");
+}
+
+/// CW-10: authorize_claim uses the configured window for expires_at.
+#[test]
+fn test_claim_window_used_in_authorize_claim() {
+    use soroban_sdk::testutils::Ledger;
+    let setup = TestSetup::new();
+    let bounty_id = 42u64;
+    let amount = 1_000i128;
+    let deadline = setup.env.ledger().timestamp() + 10_000;
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    let window_secs = 3_600u64;
+    setup.escrow.set_claim_window(&window_secs);
+
+    let now = setup.env.ledger().timestamp();
+    setup
+        .escrow
+        .authorize_claim(&bounty_id, &setup.contributor, &crate::DisputeReason::Other);
+
+    // expires_at must equal now + window_secs
+    let claim = setup.escrow.get_pending_claim(&bounty_id).unwrap();
+    assert_eq!(
+        claim.expires_at,
+        now + window_secs,
+        "expires_at must equal ledger_now + claim_window"
+    );
+}
+
+/// CW-11: set_claim_window with exactly 1 day (86400 s) succeeds.
+#[test]
+fn test_claim_window_one_day_accepted() {
+    let setup = TestSetup::new();
+    let result = setup.escrow.try_set_claim_window(&86_400u64);
+    assert!(result.is_ok(), "1 day must be accepted");
+    assert_eq!(setup.escrow.get_claim_window(), 86_400u64);
+}
+
+/// CW-12: set_claim_window with 1 week (604800 s) succeeds.
+#[test]
+fn test_claim_window_one_week_accepted() {
+    let setup = TestSetup::new();
+    let result = setup.escrow.try_set_claim_window(&604_800u64);
+    assert!(result.is_ok(), "1 week must be accepted");
+}
+
+/// CW-13: multiple updates emit multiple events.
+#[test]
+fn test_claim_window_multiple_updates_emit_multiple_events() {
+    let setup = TestSetup::new();
+    let before = setup.env.events().all().len();
+    setup.escrow.set_claim_window(&3_600u64);
+    setup.escrow.set_claim_window(&7_200u64);
+    setup.escrow.set_claim_window(&86_400u64);
+    let after = setup.env.events().all().len();
+    assert!(
+        after >= before + 3,
+        "each set_claim_window call must emit an event"
+    );
+}

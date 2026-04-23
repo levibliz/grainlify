@@ -3,7 +3,7 @@
   "contract_name": "BountyEscrowContract",
   "contract_purpose": "Manages bounty escrow with multi-token support, capability-based authorization, fee configuration, and comprehensive security features including reentrancy protection and rate limiting",
   "version": {
-    "current": "2.0.0",
+    "current": "2.3.0",
     "schema": "1.0.0",
     "history": [
       {
@@ -34,6 +34,19 @@
           "Added explicit refund eligibility view with deterministic semantics",
           "Added refund approval audit events for approval set/consumption lifecycle",
           "Added upgrade-safe storage marker for refund eligibility schema versioning"
+        ]
+      },
+      {
+        "version": "2.3.0",
+        "release_date": "2026-04-23",
+        "changes": [
+          "Added claim-window range validation: [MIN_CLAIM_WINDOW_SECS=60, MAX_CLAIM_WINDOW_SECS=2592000]",
+          "Zero claim-window explicitly rejected with InvalidClaimWindow error (code 47)",
+          "Added ClaimWindowUpdated audit event emitted after every set_claim_window call",
+          "Added ClaimWindowSchemaVersion upgrade-safe storage key to instance storage",
+          "Added get_claim_window view entrypoint returning current window in seconds",
+          "Added get_claim_window_schema_version view entrypoint for upgrade safety checks",
+          "Upgrade safety check warns when ClaimWindowSchemaVersion is absent on legacy deployments"
         ]
       }
     ]
@@ -649,12 +662,12 @@
       },
       {
         "name": "set_claim_window",
-        "description": "Set claim window duration",
+        "description": "Set claim window duration. Valid range: [60, 2592000] seconds. Zero is rejected with InvalidClaimWindow. Emits ClaimWindowUpdated audit event.",
         "parameters": [
           {
-            "name": "claim_window",
+            "name": "claim_window_secs",
             "type": "u64",
-            "description": "Seconds beneficiary has to claim"
+            "description": "Seconds beneficiary has to claim after authorize_claim. Must be in [60, 2592000]."
           }
         ],
         "returns": {
@@ -662,6 +675,30 @@
           "description": "Empty on success"
         },
         "authorization": "admin",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "get_claim_window",
+        "description": "Return the currently configured claim window in seconds. Returns 0 when unset.",
+        "parameters": [],
+        "returns": {
+          "type": "u64",
+          "description": "Claim window in seconds (0 = unset)"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "get_claim_window_schema_version",
+        "description": "Return the claim-window storage schema version written during init. Returns 0 on legacy deployments.",
+        "parameters": [],
+        "returns": {
+          "type": "u32",
+          "description": "Schema version (1 = current; 0 = legacy pre-v2.3)"
+        },
+        "authorization": "any",
         "pausable": false,
         "gas_estimate": "low"
       },
@@ -789,6 +826,18 @@
         "type": "instance",
         "description": "Version marker for refund eligibility view semantics",
         "data_structure": "u32"
+      },
+      {
+        "name": "ClaimWindowSchemaVersion",
+        "type": "instance",
+        "description": "Upgrade-safe version marker for claim-window storage layout. Increment when ClaimWindow storage layout changes.",
+        "data_structure": "u32"
+      },
+      {
+        "name": "ClaimWindow",
+        "type": "instance",
+        "description": "Global claim-window duration in seconds. Valid range: [60, 2592000]. Returns 0 when unset.",
+        "data_structure": "u64"
       },
       {
         "name": "ReentrancyGuard",
@@ -1066,6 +1115,39 @@
           }
         ],
         "trigger": "Successful refund call with admin approval record"
+      },
+      {
+        "name": "ClaimWindowUpdated",
+        "description": "Audit event emitted after every successful set_claim_window call",
+        "topics": ["cw_upd"],
+        "data": [
+          {
+            "name": "version",
+            "type": "u32",
+            "description": "Always EVENT_VERSION_V2"
+          },
+          {
+            "name": "previous_window_secs",
+            "type": "u64",
+            "description": "Previous claim-window value in seconds (0 = never set)"
+          },
+          {
+            "name": "new_window_secs",
+            "type": "u64",
+            "description": "New validated claim-window value in seconds"
+          },
+          {
+            "name": "updated_by",
+            "type": "Address",
+            "description": "Admin address that triggered the update"
+          },
+          {
+            "name": "timestamp",
+            "type": "u64",
+            "description": "Ledger timestamp"
+          }
+        ],
+        "trigger": "Every successful set_claim_window call"
       }
     ]
   },
